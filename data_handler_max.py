@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 
+INTERPOLATION_GRID = np.arange(300, 401, 1)  # сітка 300–400 нм з кроком 1 нм
 
 def read_and_clean_spectrum(file_path):
     with open(file_path, 'r', encoding='utf-8') as f:
@@ -12,7 +13,6 @@ def read_and_clean_spectrum(file_path):
 
     df = pd.read_csv(file_path, sep='\t', header=0 if has_header else None)
 
-    # Приведення назв колонок до стандартних
     df.columns = [col.strip() for col in df.columns]
     rename_map = {}
     for col in df.columns:
@@ -20,11 +20,10 @@ def read_and_clean_spectrum(file_path):
             rename_map[col] = 'Wavelength'
         elif 'count' in col.lower():
             rename_map[col] = 'Counts'
-
     df = df.rename(columns=rename_map)
 
     if 'Wavelength' not in df.columns or 'Counts' not in df.columns:
-        raise ValueError(f"[!] Немає колонок 'Wavelength' і 'Counts' у файлі: {file_path} (є {df.columns.tolist()})")
+        raise ValueError(f"[!] Немає колонок 'Wavelength' і 'Counts' у файлі: {file_path}")
 
     df['Wavelength'] = pd.to_numeric(df['Wavelength'], errors='coerce')
     df['Counts'] = pd.to_numeric(df['Counts'], errors='coerce')
@@ -42,35 +41,45 @@ def normalize_spectrum(df):
     return df
 
 
+def interpolate_to_grid(df, grid):
+    if df['Wavelength'].min() > grid[0] or df['Wavelength'].max() < grid[-1]:
+        return None  # спектр не перекриває повністю діапазон — пропускаємо
+    interpolated_counts = np.interp(grid, df['Wavelength'], df['Counts'])
+    return pd.DataFrame({'Wavelength': grid, 'Counts': interpolated_counts})
+
+
 def average_background(background_files):
     spectra = []
     for file in background_files:
         df = read_and_clean_spectrum(file)
         df = normalize_spectrum(df)
-        spectra.append(df.set_index('Wavelength'))
+        df_interp = interpolate_to_grid(df, INTERPOLATION_GRID)
+        if df_interp is not None:
+            spectra.append(df_interp['Counts'].values)
 
     if not spectra:
         return None
 
-    avg_df = pd.concat(spectra, axis=1).mean(axis=1).reset_index()
-    avg_df.columns = ['Wavelength', 'Counts']
-    return avg_df
+    avg_counts = np.mean(spectra, axis=0)
+    return pd.DataFrame({'Wavelength': INTERPOLATION_GRID, 'Counts': avg_counts})
 
 
 def process_day(input_day_path, background_df, output_day_path):
     os.makedirs(output_day_path, exist_ok=True)
 
     for txt_file in glob.glob(os.path.join(input_day_path, '*.txt')):
-        df = read_and_clean_spectrum(txt_file)
-        df = normalize_spectrum(df)
+        try:
+            df = read_and_clean_spectrum(txt_file)
+            df = normalize_spectrum(df)
+            df_interp = interpolate_to_grid(df, INTERPOLATION_GRID)
+            if df_interp is None:
+                print(f"[!] Пропущено {txt_file} — не перекриває 300–400 нм")
+                continue
 
-        merged = pd.merge(df, background_df, on='Wavelength', suffixes=('', '_bg'), how='left')
-        merged['Counts'] = merged['Counts'] - merged['Counts_bg'].fillna(0)
-        merged = merged[['Wavelength', 'Counts']]
-
-        output_file = os.path.join(output_day_path, Path(txt_file).stem + '.csv')
-        # збереження з окремими колонками (через кому)
-        merged.to_csv(output_file, index=False, sep=';')
+            df_interp['Counts'] = df_interp['Counts'] - background_df['Counts']
+            df_interp.to_csv(os.path.join(output_day_path, Path(txt_file).stem + '.csv'), index=False, sep=';')
+        except Exception as e:
+            print(f"[!] Помилка з файлом {txt_file}: {e}")
 
 
 def process_all(base_path='data', output_path='processed_max'):

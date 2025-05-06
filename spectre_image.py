@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 
 
 # Припустимо, у тебе вже є файл .csv з колонками: Wavelength, Counts
-df = pd.read_csv('C:\\Users\\User\\Desktop\\degree\\degree_model\\processed_top10\\milk_ultra_pasteriz\\молоко день 17\\SpectrumFile_002.csv', sep=';')
+df = pd.read_csv('C:\\Users\\User\\Desktop\\degree\\degree_model\\processed_top10\\milk_one_pasteriz\\день 1\\SpectrumFile_001.csv', sep=';')
 
 
 # Побудова графіку

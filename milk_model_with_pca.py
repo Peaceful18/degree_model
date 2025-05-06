@@ -2,23 +2,23 @@ import os
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split, GridSearchCV
-from sklearn.decomposition import PCA
-from sklearn.metrics import mean_absolute_error, r2_score
 from sklearn.ensemble import RandomForestRegressor
-from xgboost import XGBRegressor
-from lightgbm import LGBMRegressor
+from sklearn.metrics import mean_absolute_error, r2_score
+from sklearn.decomposition import PCA
+from sklearn.pipeline import Pipeline
 import matplotlib
 matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
 import joblib
 
-# === Завантаження спектрів ===
+# === Шлях до даних ===
 root_dir = "processed_top10"
 milk_dirs = ["milk_one_pasteriz", "milk_two_pasteriz"]
 
 X = []
 y = []
 
+# === Збір спектрів ===
 for milk_dir in milk_dirs:
     full_path = os.path.join(root_dir, milk_dir)
     for day_folder in os.listdir(full_path):
@@ -48,85 +48,62 @@ X = np.array(X)
 y = np.array(y)
 
 print(f"Кількість зчитаних спектрів: {len(X)}")
+
+# === Перевірка на дані ===
 if len(X) == 0:
     raise ValueError("Жодного спектра не зчитано!")
 
-# === Розбиття ===
+# === Розбиття на train/test ===
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-# === PCA ===
-pca = PCA(n_components=20)
-X_train_pca = pca.fit_transform(X_train)
-X_test_pca = pca.transform(X_test)
+# === Побудова пайплайну ===
+pipeline = Pipeline([
+    ('pca', PCA()),  # Спочатку PCA
+    ('regressor', RandomForestRegressor(random_state=42))  # Потім модель
+])
 
+# === Параметри для підбору ===
+param_grid = {
+    'pca__n_components': [10, 20, 30],  # Скільки головних компонент залишити
+    'regressor__n_estimators': [100, 200],
+    'regressor__max_depth': [10, None],
+}
 
-
-# === Вибір моделі: змінюй тут ===
-# model_name = 'random_forest'
-# model_name = 'xgboost'
-model_name = 'lightgbm'
-
-if model_name == 'random_forest':
-    model = RandomForestRegressor(random_state=42)
-    param_grid = {
-        'n_estimators': [100, 200],
-        'max_depth': [10, None],
-        'min_samples_split': [2, 5],
-        'max_features': ['sqrt']
-    }
-elif model_name == 'xgboost':
-    model = XGBRegressor(objective='reg:squarederror', random_state=42, verbosity=0)
-    param_grid = {
-        'n_estimators': [100, 200],
-        'max_depth': [3, 6],
-        'learning_rate': [0.05, 0.1],
-    }
-elif model_name == 'lightgbm':
-    model = LGBMRegressor(random_state=42)
-    param_grid = {
-        'n_estimators': [100, 200],
-        'max_depth': [10, -1],
-        'learning_rate': [0.05, 0.1],
-        'num_leaves': [31, 50]
-    }
-else:
-    raise ValueError("Невідома модель")
-
-# === Підбір параметрів ===
+# === GridSearchCV ===
 grid_search = GridSearchCV(
-    estimator=model,
+    estimator=pipeline,
     param_grid=param_grid,
     cv=5,
     scoring='neg_mean_absolute_error',
     verbose=2,
     n_jobs=-1
 )
-grid_search.fit(X_train_pca, y_train)
 
+# === Навчання з пошуком параметрів ===
+grid_search.fit(X_train, y_train)
+
+# === Найкраща модель ===
 best_model = grid_search.best_estimator_
 
-# === Прогноз і оцінка ===
-y_pred = best_model.predict(X_test_pca)
+# === Оцінка ===
+y_pred = best_model.predict(X_test)
 mae = mean_absolute_error(y_test, y_pred)
 r2 = r2_score(y_test, y_pred)
 
-print(f"\n=== {model_name.upper()} РЕЗУЛЬТАТИ ===")
+print(f"\n=== Результати найкращої моделі ===")
 print(f"MAE: {mae:.2f}")
 print(f"R²: {r2:.2f}")
 print("Найкращі параметри:", grid_search.best_params_)
 
-# === Збереження ===
-joblib.dump(best_model, f'best_model_{model_name}.pkl')
-joblib.dump(pca, f'pca_model_{model_name}.pkl')
-print(f"Модель збережено як best_model_{model_name}.pkl")
+# # === Збереження моделі ===
+# joblib.dump(best_model, 'best_rf_pca_model.pkl')
 
 # === Візуалізація ===
 plt.figure(figsize=(8, 5))
 plt.scatter(y_test, y_pred, alpha=0.6)
-plt.plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()], 'k--')
-plt.xlabel("Справжній день")
-plt.ylabel("Прогнозований день")
-plt.title(f"Прогноз ({model_name.upper()} + PCA)")
+plt.plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()], 'k--', lw=2)
+plt.xlabel("Справжні значення (дні)")
+plt.ylabel("Прогнозовані значення")
+plt.title("Прогноз з PCA + RandomForest")
 plt.grid(True)
-plt.tight_layout()
 plt.show()
