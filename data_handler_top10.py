@@ -2,99 +2,138 @@ import os
 import glob
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
 from pathlib import Path
 
-INTERPOLATION_GRID = np.arange(300, 401, 1)  # сітка 300–400 нм з кроком 1 нм
+
+def calibrate_wavelengths(wavelengths):
+    """Лінійне калібрування довжин хвиль."""
+    return 0.73 * wavelengths + 227.7
 
 
-def read_and_clean_spectrum(file_path):
-    with open(file_path, 'r', encoding='utf-8') as f:
-        first_line = f.readline()
-    has_header = 'Count' in first_line or 'Wave' in first_line or 'Nano' in first_line
+def read_spectrum(file_path):
+    """Зчитує спектр з файлу."""
+    try:
+        # Зчитування даних
+        df = pd.read_csv(file_path, sep='\t', header=0)
 
-    df = pd.read_csv(file_path, sep='\t', header=0 if has_header else None)
+        # Перейменування колонок
+        if 'Nanometers' in df.columns and 'Counts' in df.columns:
+            df = df.rename(columns={'Nanometers': 'Wavelength'})
 
-    df.columns = [col.strip() for col in df.columns]
-    rename_map = {}
-    for col in df.columns:
-        if 'nano' in col.lower() or 'wave' in col.lower():
-            rename_map[col] = 'Wavelength'
-        elif 'count' in col.lower():
-            rename_map[col] = 'Counts'
-    df = df.rename(columns=rename_map)
+        # Переконуємось, що колонки існують
+        if 'Wavelength' not in df.columns or 'Counts' not in df.columns:
+            print(f"Помилка: необхідні колонки не знайдені в {file_path}")
+            return None
 
-    if 'Wavelength' not in df.columns or 'Counts' not in df.columns:
-        raise ValueError(f"[!] Немає колонок 'Wavelength' і 'Counts' у файлі: {file_path}")
+        # Калібрування
+        df['Wavelength'] = calibrate_wavelengths(df['Wavelength'])
 
-    df['Wavelength'] = pd.to_numeric(df['Wavelength'], errors='coerce')
-    df['Counts'] = pd.to_numeric(df['Counts'], errors='coerce')
-    df = df.dropna()
-    df = df[df['Counts'] > 0].copy()
-    return df
-
-
-def normalize_spectrum(df, top_n=10):
-    df = df.copy()
-    top_counts = df['Counts'].nlargest(top_n)
-    norm_val = top_counts.mean() if not top_counts.empty else 1.0
-    if norm_val == 0:
         return df
-    df['Counts'] = df['Counts'] / norm_val
-    return df
 
-
-def interpolate_to_grid(df, grid):
-    if df['Wavelength'].min() > grid[0] or df['Wavelength'].max() < grid[-1]:
-        return None  # спектр не перекриває повністю діапазон — пропускаємо
-    interpolated_counts = np.interp(grid, df['Wavelength'], df['Counts'])
-    return pd.DataFrame({'Wavelength': grid, 'Counts': interpolated_counts})
+    except Exception as e:
+        print(f"Помилка при зчитуванні {file_path}: {e}")
+        return None
 
 
 def average_background(background_files):
-    spectra = []
-    for file in background_files:
-        df = read_and_clean_spectrum(file)
-        df = normalize_spectrum(df)
-        df_interp = interpolate_to_grid(df, INTERPOLATION_GRID)
-        if df_interp is not None:
-            spectra.append(df_interp['Counts'].values)
-
-    if not spectra:
+    """Обчислюємо середній фоновий спектр."""
+    if not background_files:
         return None
 
-    avg_counts = np.mean(spectra, axis=0)
-    return pd.DataFrame({'Wavelength': INTERPOLATION_GRID, 'Counts': avg_counts})
+    background_spectra = []
+    for file in background_files:
+        bg = read_spectrum(file)
+        if bg is not None:
+            background_spectra.append(bg)
+
+    if not background_spectra:
+        return None
+
+    # Створюємо загальну сітку довжин хвиль
+    min_wl = max([bg['Wavelength'].min() for bg in background_spectra])
+    max_wl = min([bg['Wavelength'].max() for bg in background_spectra])
+
+    # Перевіряємо, чи є діапазон
+    if min_wl >= max_wl:
+        print("Помилка: неправильний діапазон для фонових спектрів")
+        return None
+
+    # Створюємо рівномірну сітку для інтерполяції
+    grid = np.linspace(min_wl, max_wl, 100)  # 100 точок між мін і макс
+
+    # Інтерполюємо всі спектри на нову сітку
+    interpolated = []
+    for bg in background_spectra:
+        interp_counts = np.interp(grid, bg['Wavelength'], bg['Counts'])
+        interpolated.append(interp_counts)
+
+    # Обчислюємо середнє
+    avg_counts = np.mean(interpolated, axis=0)
+
+    return pd.DataFrame({'Wavelength': grid, 'Counts': avg_counts})
 
 
-def process_day(input_day_path, background_df, output_day_path):
-    os.makedirs(output_day_path, exist_ok=True)
+def process_spectrum(spectrum_df, background_df, normalize=True):
+    """Обробляє один спектр: віднімає фон, нормалізує і інтерполює."""
+    if spectrum_df is None or background_df is None:
+        return None
 
-    for txt_file in glob.glob(os.path.join(input_day_path, '*.txt')):
-        try:
-            df = read_and_clean_spectrum(txt_file)
-            df = normalize_spectrum(df)
-            df_interp = interpolate_to_grid(df, INTERPOLATION_GRID)
-            if df_interp is None:
-                print(f"[!] Пропущено {txt_file} — не перекриває 300–400 нм")
-                continue
+    # Інтерполюємо фон на сітку спектру
+    bg_interp = np.interp(spectrum_df['Wavelength'],
+                          background_df['Wavelength'],
+                          background_df['Counts'])
 
-            df_interp['Counts'] = df_interp['Counts'] - background_df['Counts']
-            df_interp.to_csv(os.path.join(output_day_path, Path(txt_file).stem + '.csv'), index=False, sep=';')
-        except Exception as e:
-            print(f"[!] Помилка з файлом {txt_file}: {e}")
+    # Віднімаємо фон
+    result_df = spectrum_df.copy()
+    result_df['Counts'] = spectrum_df['Counts'] - bg_interp
+    result_df['Counts'] = result_df['Counts'].clip(lower=0)
+
+    # Нормалізуємо (опційно)
+    if normalize:
+        max_val = result_df['Counts'].max()
+        if max_val > 0:
+            result_df['Counts'] = result_df['Counts'] / max_val
+
+    # Інтерполяція на фіксовану сітку
+    INTERPOLATION_GRID = np.arange(442, 569, 1)
+    interp_counts = np.interp(INTERPOLATION_GRID, result_df['Wavelength'], result_df['Counts'])
+
+    return pd.DataFrame({'Wavelength': INTERPOLATION_GRID, 'Counts': interp_counts})
 
 
-def process_all(base_path='data', output_path='processed_top10'):
+def process_all_spectra(base_path='data', output_path='processed_simple', normalize=True):
+    """Обробка всіх спектрів з використанням простого підходу."""
+    # Зчитуємо фонові спектри
     background_files = glob.glob(os.path.join(base_path, 'background', 'день 1', '*.txt'))
     if not background_files:
-        print("[!] Немає фонів у background/day 1 — обробка припинена")
+        print("Фонові спектри не знайдені")
         return
 
+    print(f"Знайдено {len(background_files)} фонових файлів")
+
+    # Створюємо середній фон
     background_df = average_background(background_files)
     if background_df is None:
-        print("[!] Порожній фон у background/day 1 — обробка припинена")
+        print("Не вдалося створити середній фоновий спектр")
         return
 
+    print(f"Середній фон створено: {len(background_df)} точок")
+    print(f"Діапазон фону: {background_df['Wavelength'].min():.2f} - {background_df['Wavelength'].max():.2f} нм")
+    print(f"Значення фону: {background_df['Counts'].min():.2f} - {background_df['Counts'].max():.2f}")
+
+    # Створюємо графік фону
+    plt.figure(figsize=(10, 6))
+    plt.plot(background_df['Wavelength'], background_df['Counts'], 'r-')
+    plt.title('Середній фоновий спектр')
+    plt.xlabel('Довжина хвилі (нм)')
+    plt.ylabel('Інтенсивність')
+    plt.grid(True)
+    os.makedirs(output_path, exist_ok=True)
+    plt.savefig(os.path.join(output_path, 'background.png'))
+    plt.close()
+
+    # Обробка спектрів зразків
     for milk_type in os.listdir(base_path):
         milk_path = os.path.join(base_path, milk_type)
         if not os.path.isdir(milk_path) or milk_type == 'background':
@@ -102,10 +141,56 @@ def process_all(base_path='data', output_path='processed_top10'):
 
         for day_dir in glob.glob(os.path.join(milk_path, '*день*')):
             day_name = os.path.basename(day_dir)
+
+            # Створюємо вихідну папку
             output_day_path = os.path.join(output_path, milk_type, day_name)
-            process_day(day_dir, background_df, output_day_path)
+            os.makedirs(output_day_path, exist_ok=True)
+
+            # Обробляємо кожен файл
+            for txt_file in glob.glob(os.path.join(day_dir, '*.txt')):
+                # Зчитуємо спектр
+                spectrum_df = read_spectrum(txt_file)
+                if spectrum_df is None:
+                    print(f"Помилка при зчитуванні {txt_file}")
+                    continue
+
+                # Обробляємо спектр
+                result_df = process_spectrum(spectrum_df, background_df, normalize=normalize)
+                if result_df is None:
+                    print(f"Помилка при обробці {txt_file}")
+                    continue
+
+                # Зберігаємо результат
+                output_file = os.path.join(output_day_path, Path(txt_file).stem + '.csv')
+                result_df.to_csv(output_file, index=False, sep=';')
+
+                # Створюємо графік (для перших 5 файлів у кожній папці)
+                if len(glob.glob(os.path.join(output_day_path, '*.png'))) < 5:
+                    plt.figure(figsize=(12, 8))
+
+                    plt.subplot(2, 1, 1)
+                    plt.plot(spectrum_df['Wavelength'], spectrum_df['Counts'], 'b-', label='Оригінальний спектр')
+                    plt.plot(background_df['Wavelength'], background_df['Counts'], 'r-', label='Фон')
+                    plt.title(f'Спектр {Path(txt_file).stem}')
+                    plt.xlabel('Довжина хвилі (нм)')
+                    plt.ylabel('Інтенсивність')
+                    plt.legend()
+                    plt.grid(True)
+
+                    plt.subplot(2, 1, 2)
+                    plt.plot(result_df['Wavelength'], result_df['Counts'], 'g-')
+                    plt.title('Після обробки (віднімання фону' + (' і нормалізації' if normalize else '') + ')')
+                    plt.xlabel('Довжина хвилі (нм)')
+                    plt.ylabel('Інтенсивність')
+                    plt.grid(True)
+
+                    plt.tight_layout()
+                    plt.savefig(os.path.join(output_day_path, Path(txt_file).stem + '.png'))
+                    plt.close()
+
+    print("Обробка завершена")
 
 
-if __name__ == '__main__':
-    process_all()
-    print("[*] Обробка завершена")
+if __name__ == "__main__":
+    # Запуск з нормалізацією (за замовчуванням)
+    process_all_spectra(normalize=True)

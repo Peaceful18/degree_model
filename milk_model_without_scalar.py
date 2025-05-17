@@ -1,20 +1,18 @@
 import os
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.model_selection import train_test_split, RandomizedSearchCV
 from sklearn.decomposition import PCA
 from sklearn.metrics import mean_absolute_error, r2_score
-from sklearn.ensemble import RandomForestRegressor
-from xgboost import XGBRegressor
 from lightgbm import LGBMRegressor
-from sklearn.preprocessing import StandardScaler
+from lightgbm import early_stopping
 import matplotlib
 matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
 import joblib
 
 # === Завантаження спектрів ===
-root_dir = "processed_top10"
+root_dir = "processed_simple"
 milk_dirs = ["milk_one_pasteriz", "milk_two_pasteriz"]
 
 X = []
@@ -55,73 +53,70 @@ if len(X) == 0:
 # === Розбиття ===
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-# === Масштабування даних ===
-scaler = StandardScaler()
-X_train_scaled = scaler.fit_transform(X_train)
-X_test_scaled = scaler.transform(X_test)
-
 # === PCA ===
-pca = PCA(n_components=20)
-X_train_pca = pca.fit_transform(X_train_scaled)
-X_test_pca = pca.transform(X_test_scaled)
+pca = PCA(n_components=15)
+X_train_pca = pca.fit_transform(X_train)
+X_test_pca = pca.transform(X_test)
 
-# === Вибір моделі ===
-model_name = 'random_forest'
+# === LightGBM ===
+model = LGBMRegressor(random_state=42, n_estimators=1000)
 
-if model_name == 'random_forest':
-    model = RandomForestRegressor(random_state=42)
-    param_grid = {
-        'n_estimators': [100, 200],
-        'max_depth': [10, None],
-        'min_samples_split': [2, 5],
-        'max_features': ['sqrt']
-    }
-elif model_name == 'xgboost':
-    model = XGBRegressor(objective='reg:squarederror', random_state=42, verbosity=0)
-    param_grid = {
-        'n_estimators': [100, 200],
-        'max_depth': [3, 6],
-        'learning_rate': [0.05, 0.1],
-    }
-elif model_name == 'lightgbm':
-    model = LGBMRegressor(random_state=42)
-    param_grid = {
-        'n_estimators': [50, 100],
-        'max_depth': [3, 6],
-        'learning_rate': [0.05, 0.1],
-        'num_leaves': [15, 31]
-    }
-else:
-    raise ValueError("Невідома модель")
+param_dist = {
+    'max_depth': [3, 5, 7],
+    'learning_rate': [0.005, 0.01, 0.02],
+    'num_leaves': [7, 10, 15],
+    'reg_alpha': [0.0, 1.0, 5.0],
+    'reg_lambda': [0.0, 1.0, 5.0],
+    'subsample': [0.8, 0.9, 1.0],
+    'colsample_bytree': [0.8, 0.9, 1.0]
+}
 
-# === Підбір параметрів ===
-grid_search = GridSearchCV(
+# === Randomized Search ===
+random_search = RandomizedSearchCV(
     estimator=model,
-    param_grid=param_grid,
+    param_distributions=param_dist,
+    n_iter=50,
     cv=5,
     scoring='neg_mean_absolute_error',
     verbose=2,
-    n_jobs=-1
+    n_jobs=-1,
+    random_state=42
 )
-grid_search.fit(X_train_pca, y_train)
 
-best_model = grid_search.best_estimator_
+# === Правильний спосіб early_stopping через callbacks ===
+fit_params = {
+    "eval_set": [(X_test_pca, y_test)],
+    "eval_metric": "mae",
+    "callbacks": [early_stopping(stopping_rounds=20)]
+}
+
+# === Навчання
+random_search.fit(X_train_pca, y_train, **fit_params)
+
+best_model = random_search.best_estimator_
 
 # === Прогноз і оцінка ===
 y_pred = best_model.predict(X_test_pca)
 mae = mean_absolute_error(y_test, y_pred)
 r2 = r2_score(y_test, y_pred)
 
-print(f"\n=== {model_name.upper()} РЕЗУЛЬТАТИ ===")
+print(f"\n=== LIGHTGBM РЕЗУЛЬТАТИ ===")
 print(f"MAE: {mae:.2f}")
 print(f"R²: {r2:.2f}")
-print("Найкращі параметри:", grid_search.best_params_)
+print("Найкращі параметри:", random_search.best_params_)
+
+# Оцінка на train
+y_train_pred = best_model.predict(X_train_pca)
+train_mae = mean_absolute_error(y_train, y_train_pred)
+train_r2 = r2_score(y_train, y_train_pred)
+
+print(f"Train MAE: {train_mae:.2f}, Train R²: {train_r2:.2f}")
+print(f"Test  MAE: {mae:.2f}, Test  R²: {r2:.2f}")
 
 # === Збереження ===
-joblib.dump(best_model, f'best_model_{model_name}.pkl')
-joblib.dump(pca, f'pca_model_{model_name}.pkl')
-joblib.dump(scaler, f'scaler_model_{model_name}.pkl')
-print(f"Модель збережено як best_model_{model_name}.pkl")
+joblib.dump(best_model, f'best_model_lightgbm.pkl')
+joblib.dump(pca, f'pca_model_lightgbm.pkl')
+print(f"Модель збережено як best_model_lightgbm.pkl")
 
 # === Візуалізація ===
 plt.figure(figsize=(8, 5))
@@ -129,7 +124,7 @@ plt.scatter(y_test, y_pred, alpha=0.6)
 plt.plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()], 'k--')
 plt.xlabel("Справжній день")
 plt.ylabel("Прогнозований день")
-plt.title(f"Прогноз ({model_name.upper()} + PCA + StandardScaler)")
+plt.title(f"Прогноз (LIGHTGBM + PCA)")
 plt.grid(True)
 plt.tight_layout()
 plt.show()
